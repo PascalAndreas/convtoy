@@ -50,34 +50,36 @@ class Imp(Soul):
         Apply single convolution layer with residual connection.
         
         Args:
-            image: Input image tensor (C, H, W)
+            image: Input image tensor (C, H, W) on any device
             residual_alpha: Blending factor for residual connection
             
         Returns:
-            Processed image tensor (C, H, W)
+            Processed image tensor (C, H, W) on device
         """
         pad_size = self.padding
         kernel = self.kernels[0].to(self.device)
         
-        # Add batch dimension
-        img_batch = image.unsqueeze(0).to(self.device)
+        # Move image to device and add batch dimension
+        img_batch = image.to(self.device).unsqueeze(0)
         
         # Apply circular padding
         img_padded = F.pad(img_batch, (pad_size, pad_size, pad_size, pad_size), mode='circular')
         
         # Apply convolution
-        conv_result = F.conv2d(img_padded, kernel, padding=0).squeeze(0).cpu()
+        conv_result = F.conv2d(img_padded, kernel, padding=0).squeeze(0)
         
         # Apply non-linearity
         conv_result = torch.tanh(conv_result)
         
         # Residual blending
-        result = (1 - residual_alpha) * image + residual_alpha * conv_result
+        img_on_device = image.to(self.device)
+        result = (1 - residual_alpha) * img_on_device + residual_alpha * conv_result
         
         # Normalize
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
         result = torch.tanh(result * 0.5)
         
+        # Keep on device for efficiency
         return result
 

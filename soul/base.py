@@ -26,10 +26,21 @@ class Soul(ABC):
             padding: Padding size for image (kernel_size // 2, default: 3)
             drift_magnitude: Magnitude of drift direction vector
             momentum: Momentum factor for drift direction updates (0-1)
-            device: PyTorch device (cuda or cpu)
+            device: PyTorch device (cuda, mps, or cpu)
         """
         self.padding = padding
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Device selection: prefer CUDA > MPS (Apple Silicon) > CPU
+        if device is None:
+            if torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.device = torch.device("mps")
+            else:
+                self.device = torch.device("cpu")
+        else:
+            self.device = device
+        
         self.drift_magnitude = drift_magnitude
         self.momentum = momentum
         
@@ -59,12 +70,7 @@ class Soul(ABC):
     
     @abstractmethod
     def _initialize_kernels(self):
-        """
-        Initialize convolution kernels.
-        
-        Returns:
-            List of kernel tensors
-        """
+        """Initialize convolution kernels."""
         pass
     
     @abstractmethod
@@ -75,35 +81,26 @@ class Soul(ABC):
         Args:
             image: Input image tensor (C, H, W)
             residual_alpha: Blending factor for residual connections
-            
+
         Returns:
             Processed image tensor (C, H, W)
         """
         pass
     
-    def get_sliders(self):
-        """
-        Return soul-specific slider definitions.
-        
-        Returns:
-            List of slider config dicts with keys:
-                - label: Display name (required)
-                - value_attr: Attribute name on soul object (required)
-                - min_value: Minimum value (optional, default: 0.0)
-                - max_value: Maximum value (optional, default: 1.0)
-        """
+    def get_base_sliders(self):
+        """Return base sliders that all souls have."""
+        return [{"label": "Momentum", "value_attr": "momentum"}]
+    
+    def get_soul_sliders(self):
+        """Return soul-specific sliders. Override this in subclasses."""
         return []
+
+    def get_sliders(self):
+        """Return all slider definitions (base + soul-specific)."""
+        return self.get_base_sliders() + self.get_soul_sliders()
     
     def _enforce_zero_mean(self, kernel):
-        """
-        Enforce zero-mean constraint on a kernel.
-        
-        Args:
-            kernel: Kernel tensor to make zero-mean
-            
-        Returns:
-            Zero-mean kernel tensor
-        """
+        """Enforce zero-mean constraint on a kernel."""
         return kernel - kernel.mean()
     
     def randomize_kernels(self):
@@ -159,6 +156,66 @@ class Soul(ABC):
                 
                 self.drift_directions[i] = new_direction
     
+    def apply_perturbation(self, image, mask, strength=0.1, mode='noise'):
+        """
+        Apply perturbation to image using a mask.
+        
+        This is device-accelerated and much faster than CPU operations.
+        
+        Args:
+            image: Image tensor (C, H, W) on any device
+            mask: Perturbation mask (H, W) on any device, values 0-1
+            strength: Perturbation strength
+            mode: 'noise' or 'swirl' (default: 'noise')
+            
+        Returns:
+            Perturbed image tensor
+        """
+        if strength <= 0:
+            return image
+        
+        # Ensure tensors are on the same device
+        image = image.to(self.device)
+        mask = mask.to(self.device)
+        
+        if mode == 'noise':
+            # Random noise perturbation
+            noise = torch.randn_like(image) * strength
+            perturbation = noise * mask.unsqueeze(0)
+            return torch.clamp(image + perturbation, -1, 1)
+        
+        elif mode == 'swirl':
+            # Swirl/rotation perturbation (more interesting visual effect)
+            # Create small rotation field where mask is high
+            angle = mask * strength * 0.5  # Rotation angle field
+            
+            # Find center of mass of the mask (where user clicked)
+            h, w = image.shape[1], image.shape[2]
+            y, x = torch.meshgrid(torch.arange(h, device=self.device, dtype=torch.float32), 
+                                 torch.arange(w, device=self.device, dtype=torch.float32), indexing='ij')
+            
+            # Center of perturbation (weighted by mask)
+            mask_sum = mask.sum() + 1e-8
+            center_y = (y * mask).sum() / mask_sum
+            center_x = (x * mask).sum() / mask_sum
+            
+            dy, dx = y - center_y, x - center_x
+            
+            # Apply rotation based on mask strength
+            cos_a = torch.cos(angle)
+            sin_a = torch.sin(angle)
+            
+            new_y = (dy * cos_a - dx * sin_a + center_y).long().clamp(0, h - 1)
+            new_x = (dy * sin_a + dx * cos_a + center_x).long().clamp(0, w - 1)
+            
+            swirled = image[:, new_y, new_x]
+            
+            # Blend swirled with original based on mask
+            alpha = mask.unsqueeze(0) * 0.3
+            return image * (1 - alpha) + swirled * alpha
+        
+        return image
+    
     def apply_drift(self, heart_signal):
         """
         Apply drift to kernels using the heart signal and current drift directions.
@@ -185,9 +242,6 @@ class Soul(ABC):
                 if current_rms > 1e-8:
                     # Soft pull toward target RMS with exponential averaging
                     # This allows drift while preventing unbounded growth/decay
-                    scale_factor = torch.lerp(
-                        torch.tensor(1.0),
-                        torch.tensor(target_rms / current_rms),
-                        0.1  # 10% correction toward target per drift
-                    )
+                    target_scale = target_rms / current_rms
+                    scale_factor = 0.9 + 0.1 * target_scale  # 10% correction toward target
                     self.kernels[i] = self.kernels[i] * scale_factor

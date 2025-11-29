@@ -63,11 +63,14 @@ class Ophanim(Soul):
         Apply swirling multi-scale depthwise convolutions with color weaving.
 
         Args:
-            image: Input image tensor (C, H, W).
+            image: Input image tensor (C, H, W) on any device.
             residual_alpha: Blend factor for the new swirl versus the old frame.
+            
+        Returns:
+            Processed image tensor (C, H, W) on device
         """
         # Stage 1: color pre-mix (keeps hue motion alive)
-        x = image.unsqueeze(0).to(self.device)
+        x = image.to(self.device).unsqueeze(0)
         pre = F.conv2d(x, self.kernels[0].to(self.device), padding=0)
         pre = torch.tanh(pre)
 
@@ -99,9 +102,13 @@ class Ophanim(Soul):
 
         # Stage 4: color fuse and residual blend
         fused = F.conv2d(fused, self.kernels[-1].to(self.device), padding=0)
-        fused = torch.tanh(fused).squeeze(0).cpu()
+        fused = torch.tanh(fused).squeeze(0)
 
-        result = (1 - residual_alpha) * image + residual_alpha * fused
+        img_on_device = image.to(self.device)
+        result = (1 - residual_alpha) * img_on_device + residual_alpha * fused
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
-        return torch.tanh(result * 0.6)
+        result = torch.tanh(result * 0.6)
+        
+        # Keep on device for efficiency
+        return result

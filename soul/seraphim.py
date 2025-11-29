@@ -60,26 +60,27 @@ class Seraphim(Soul):
         Apply multiple convolution layers with residual updates and stable normalization.
         
         Args:
-            image: Input image tensor (C, H, W)
+            image: Input image tensor (C, H, W) on any device
             residual_alpha: How much of new conv to blend in (0=no change, 1=full replacement)
             
         Returns:
-            Processed image tensor (C, H, W)
+            Processed image tensor (C, H, W) on device
         """
-        result = image
+        # Move image to device for all operations
+        result = image.to(self.device)
         pad_size = self.padding
         
         # Apply each layer sequentially
         for kernel in self.kernels:
             # Add batch dimension
-            img_batch = result.unsqueeze(0).to(self.device)
+            img_batch = result.unsqueeze(0)
             kernel = kernel.to(self.device)
             
             # Apply circular padding so edges wrap around
             img_padded = F.pad(img_batch, (pad_size, pad_size, pad_size, pad_size), mode='circular')
             
             # Apply 3-channel convolution (allows color channel mixing)
-            conv_result = F.conv2d(img_padded, kernel, padding=0).squeeze(0).cpu()
+            conv_result = F.conv2d(img_padded, kernel, padding=0).squeeze(0)
             
             # Apply non-linearity after each convolution
             conv_result = torch.tanh(conv_result)
@@ -93,9 +94,10 @@ class Seraphim(Soul):
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
         result = torch.tanh(result * self.nonlinearity_scale)  # Soft clamp
         
+        # Keep on device for efficiency
         return result
     
-    def get_sliders(self):
+    def get_soul_sliders(self):
         """Return Seraphim-specific sliders"""
         return [
             {

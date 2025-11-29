@@ -69,8 +69,11 @@ class Cherubim(Soul):
         Apply dual-stream gated convolutional feedback.
 
         Args:
-            image: Input image tensor (C, H, W).
+            image: Input image tensor (C, H, W) on any device.
             residual_alpha: Blend factor for the new frame versus the old.
+            
+        Returns:
+            Processed image tensor (C, H, W) on device
         """
         pad = self.padding
         x = F.pad(image.unsqueeze(0).to(self.device),
@@ -97,9 +100,13 @@ class Cherubim(Soul):
         # Decode back to RGB
         braided = F.pad(braided, (pad, pad, pad, pad), mode="circular")
         out = F.conv2d(braided, self.kernels[3].to(self.device), padding=0)
-        out = torch.tanh(out).squeeze(0).cpu()
+        out = torch.tanh(out).squeeze(0)
 
-        result = (1 - residual_alpha) * image + residual_alpha * out
+        img_on_device = image.to(self.device)
+        result = (1 - residual_alpha) * img_on_device + residual_alpha * out
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
-        return torch.tanh(result * 0.6)
+        result = torch.tanh(result * 0.6)
+        
+        # Keep on device for efficiency
+        return result

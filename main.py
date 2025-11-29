@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import sys
+import time
+from collections import deque
 from soul import Seraphim, Imp
 from heart import Heart
 
@@ -27,8 +29,8 @@ INSTRUCTIONS_HEIGHT = 220  # Height needed for instructions at bottom
 
 class ConvolutionArt:
     def __init__(self, conv_processor=None, bpm=120):
-        # Device (use CUDA if available, otherwise CPU)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Device (use CUDA > MPS > CPU)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() else "cpu")
         print(f"Using device: {self.device}")
         
         # Convolution processor
@@ -74,14 +76,14 @@ class ConvolutionArt:
         # Residual/blend parameter (prevents collapse)
         self.residual_alpha = 0.8  # How much of new conv to blend in (0=no change, 1=full replacement)
         
-        # Precompute center + vignette mask
-        self._create_perturbation_mask()
+        # Precompute center + vignette mask (on device for efficiency)
+        self.perturbation_mask = self._create_perturbation_mask()
         
         # Mouse perturbation settings
         self.mouse_pressed = False
         self.mouse_press_start = 0
         self.mouse_pos = (0, 0)
-        self.perturb_radius = 30
+        self.perturb_radius = 80  # Increased for larger resolution
         self.display_offset = (IMAGE_MARGIN, IMAGE_MARGIN)
         
         # UI elements
@@ -92,15 +94,25 @@ class ConvolutionArt:
         # Create reusable surface for efficient pixel updates (no scaling)
         self.display_surface = pygame.Surface((self.img_width, self.img_height))
         
+        # Performance tracking
+        self.show_timing = False  # Toggle with 'T' key
+        self.timing_history = {
+            'drift': deque(maxlen=60),
+            'noise': deque(maxlen=60),
+            'conv': deque(maxlen=60),
+            'render': deque(maxlen=60),
+            'total': deque(maxlen=60)
+        }
+        
     def _random_image(self):
-        """Generate a random RGB image"""
-        return torch.rand(3, self.img_height, self.img_width)
+        """Generate a random RGB image on device"""
+        return torch.rand(3, self.img_height, self.img_width, device=self.device)
     
     def _create_perturbation_mask(self):
-        """Create a mask for center + vignette perturbation"""
+        """Create a mask for center + vignette perturbation (on device)"""
         y_coords, x_coords = torch.meshgrid(
-            torch.arange(self.img_height, dtype=torch.float32),
-            torch.arange(self.img_width, dtype=torch.float32),
+            torch.arange(self.img_height, dtype=torch.float32, device=self.device),
+            torch.arange(self.img_width, dtype=torch.float32, device=self.device),
             indexing='ij'
         )
         
@@ -117,14 +129,13 @@ class ConvolutionArt:
         center_mask = torch.exp(-(dist_from_center**2) / 0.5)
         
         # Create vignette (stronger near edges)
-        # Using distance from center, inverted
         vignette_mask = torch.clamp(dist_from_center - 0.3, 0, 1)
         
         # Combine: center bump + edge vignette
-        self.perturbation_mask = center_mask + vignette_mask * 0.5
+        mask = center_mask + vignette_mask * 0.5
         
-        # Normalize to [0, 1]
-        self.perturbation_mask = self.perturbation_mask / self.perturbation_mask.max()
+        # Normalize to [0, 1] and keep on device
+        return mask / mask.max()
     
     def _create_buttons(self):
         """Create UI buttons"""
@@ -197,17 +208,20 @@ class ConvolutionArt:
         return sliders
     
     def apply_image_noise(self):
-        """Add random noise with center + vignette pattern"""
+        """Add random noise with center + vignette pattern (device-accelerated)"""
         if self.noise_amount <= 0:
             return
         
-        # Generate and apply masked noise
-        noise = torch.randn_like(self.image) * self.noise_amount
-        masked_noise = noise * self.perturbation_mask.unsqueeze(0)
-        self.image = torch.clamp(self.image + masked_noise, -1, 1)
+        # Use device-accelerated perturbation
+        self.image = self.conv_processor.apply_perturbation(
+            self.image, 
+            self.perturbation_mask, 
+            strength=self.noise_amount,
+            mode='noise'
+        )
     
     def apply_mouse_perturbation(self):
-        """Apply localized perturbation where mouse is pressed"""
+        """Apply localized perturbation where mouse is pressed (device-accelerated)"""
         if not self.mouse_pressed:
             return
         
@@ -218,39 +232,46 @@ class ConvolutionArt:
         if not img_rect.collidepoint(mouse_x, mouse_y):
             return
         
-        # Convert to image coordinates
-        img_x = int((mouse_x - self.display_offset[0]) / self.img_width * self.img_width)
-        img_y = int((mouse_y - self.display_offset[1]) / self.img_height * self.img_height)
+        # Convert to image coordinates (direct pixel mapping)
+        img_x = int(mouse_x - self.display_offset[0])
+        img_y = int(mouse_y - self.display_offset[1])
         
         # Calculate strength based on press duration
         press_duration = pygame.time.get_ticks() - self.mouse_press_start
-        strength = min(press_duration / 1000.0, 5.0) * 0.05
+        strength = min(press_duration / 1000.0, 3.0) * 0.08
         
-        # Create coordinate grid
+        # Create coordinate grid on device
         y_coords, x_coords = torch.meshgrid(
-            torch.arange(self.img_height, dtype=torch.float32),
-            torch.arange(self.img_width, dtype=torch.float32),
+            torch.arange(self.img_height, dtype=torch.float32, device=self.device),
+            torch.arange(self.img_width, dtype=torch.float32, device=self.device),
             indexing='ij'
         )
         
         # Calculate toroidal distance (wrapping at edges)
-        dx = torch.min(torch.abs(x_coords - img_x), self.img_width - torch.abs(x_coords - img_x))
-        dy = torch.min(torch.abs(y_coords - img_y), self.img_height - torch.abs(y_coords - img_y))
+        dx = torch.minimum(torch.abs(x_coords - img_x), self.img_width - torch.abs(x_coords - img_x))
+        dy = torch.minimum(torch.abs(y_coords - img_y), self.img_height - torch.abs(y_coords - img_y))
         dist = torch.sqrt(dx**2 + dy**2)
         
         # Create localized Gaussian mask
         mask = torch.exp(-(dist**2) / (2 * self.perturb_radius**2))
         mask = torch.where(dist <= self.perturb_radius * 2, mask, torch.zeros_like(mask))
         
-        # Apply perturbation
-        noise = torch.randn(3, self.img_height, self.img_width) * strength
-        self.image = self.image + noise * mask.unsqueeze(0)
+        # Apply perturbation using device-accelerated method
+        self.image = self.conv_processor.apply_perturbation(
+            self.image,
+            mask,
+            strength=strength,
+            mode='swirl'  # Use swirl effect for more interesting visual
+        )
     
     def image_to_surface(self, img_tensor):
-        """Convert torch tensor to pygame surface"""
+        """Convert torch tensor to pygame surface (copies from device to CPU for rendering)"""
+        # Copy to CPU for rendering (only happens once per frame)
+        img_cpu = img_tensor.cpu()
+        
         # Min-max normalization for display only
-        img_min, img_max = img_tensor.min(), img_tensor.max()
-        img_display = (img_tensor - img_min) / (img_max - img_min + 1e-6)
+        img_min, img_max = img_cpu.min(), img_cpu.max()
+        img_display = (img_cpu - img_min) / (img_max - img_min + 1e-6)
         
         # Convert to uint8 and blit
         img_np = (img_display.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
@@ -259,8 +280,8 @@ class ConvolutionArt:
         return self.display_surface
     
     def _resize_image(self, new_width, new_height):
-        """Helper to resize image and recreate surfaces"""
-        # Resize image using bilinear interpolation
+        """Helper to resize image and recreate surfaces (keeps image on device)"""
+        # Resize image using bilinear interpolation (stays on device)
         resized = F.interpolate(self.image.unsqueeze(0), 
                                size=(new_height, new_width), 
                                mode='bilinear', align_corners=False)
@@ -272,7 +293,7 @@ class ConvolutionArt:
         
         # Recreate display surface and perturbation mask
         self.display_surface = pygame.Surface((self.img_width, self.img_height))
-        self._create_perturbation_mask()
+        self.perturbation_mask = self._create_perturbation_mask()
     
     def toggle_fullscreen(self):
         """Toggle between windowed and fullscreen mode"""
@@ -328,6 +349,45 @@ class ConvolutionArt:
         self.screen.blit(fps_bg, (5, 5))
         self.screen.blit(fps_surf, (10, 8))
     
+    def draw_timing(self):
+        """Draw timing diagnostics"""
+        if not self.show_timing:
+            return
+        
+        # Calculate averages
+        timings = {}
+        for key, history in self.timing_history.items():
+            if history:
+                timings[key] = sum(history) / len(history) * 1000  # Convert to ms
+            else:
+                timings[key] = 0.0
+        
+        # Create timing display
+        y_offset = 35
+        lines = [
+            f"=== Timing (ms/frame) ===",
+            f"Drift:  {timings['drift']:.2f}",
+            f"Noise:  {timings['noise']:.2f}",
+            f"Conv:   {timings['conv']:.2f}",
+            f"Render: {timings['render']:.2f}",
+            f"Total:  {timings['total']:.2f}",
+            f"Device: {self.conv_processor.device}"
+        ]
+        
+        # Find max width for background
+        max_width = max(self.font.size(line)[0] for line in lines)
+        
+        # Semi-transparent background
+        bg = pygame.Surface((max_width + 20, len(lines) * 25 + 10))
+        bg.set_alpha(180)
+        bg.fill(BLACK)
+        self.screen.blit(bg, (5, y_offset))
+        
+        # Draw text
+        for i, line in enumerate(lines):
+            text_surf = self.font.render(line, True, TEXT_COLOR)
+            self.screen.blit(text_surf, (10, y_offset + 5 + i * 25))
+    
     def draw_ui(self):
         """Draw UI elements"""
         # Draw buttons
@@ -369,6 +429,7 @@ class ConvolutionArt:
             "I - Randomize Image",
             "K - Randomize Kernels",
             "F - Fullscreen",
+            "T - Toggle Timing",
             "",
             "Click & Hold:",
             "Perturb Image",
@@ -398,6 +459,9 @@ class ConvolutionArt:
                     elif event.key == pygame.K_f:
                         # Toggle fullscreen
                         self.toggle_fullscreen()
+                    elif event.key == pygame.K_t:
+                        # Toggle timing display
+                        self.show_timing = not self.show_timing
                 
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:  # Left click
@@ -437,10 +501,14 @@ class ConvolutionArt:
                     if self.mouse_pressed:
                         self.mouse_pos = event.pos
             
+            frame_start = time.perf_counter()
+            
             # Get heart signal and pump (impulsive heartbeat signal)
             heart_signal = self.heart.beat()
             pump_signal = self.heart.get_pump_signal()
             
+            # Drift and noise application
+            t0 = time.perf_counter()
             # Change drift direction (random walk on sphere with momentum)
             # Use pump signal for more impulsive, visceral heartbeat feeling
             self.conv_processor.change_drift(0.02 * pump_signal)
@@ -449,17 +517,24 @@ class ConvolutionArt:
             # This creates a strong "thump" during each heartbeat
             drift_signal = heart_signal * (1.0 + 3.0 * pump_signal)
             self.conv_processor.apply_drift(drift_signal * self.drift_scale)
+            t1 = time.perf_counter()
+            self.timing_history['drift'].append(t1 - t0)
             
-            # Apply image noise
+            # Apply image noise and mouse perturbation
+            t0 = time.perf_counter()
             self.apply_image_noise()
-            
-            # Apply mouse perturbation
             self.apply_mouse_perturbation()
+            t1 = time.perf_counter()
+            self.timing_history['noise'].append(t1 - t0)
             
             # Apply convolution
+            t0 = time.perf_counter()
             self.image = self.conv_processor.apply(self.image, self.residual_alpha)
+            t1 = time.perf_counter()
+            self.timing_history['conv'].append(t1 - t0)
             
             # Render
+            t0 = time.perf_counter()
             self.screen.fill(BLACK)
             surface = self.image_to_surface(self.image)
             
@@ -475,8 +550,15 @@ class ConvolutionArt:
             
             self.screen.blit(surface, self.display_offset)
             self.draw_fps()  # Always draw FPS counter
+            self.draw_timing()  # Draw timing if enabled
             
             pygame.display.flip()
+            t1 = time.perf_counter()
+            self.timing_history['render'].append(t1 - t0)
+            
+            frame_end = time.perf_counter()
+            self.timing_history['total'].append(frame_end - frame_start)
+            
             self.clock.tick(FPS)
         
         pygame.quit()
