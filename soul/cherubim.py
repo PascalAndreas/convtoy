@@ -20,17 +20,21 @@ class Cherubim(Soul):
     """
 
     def __init__(self, kernel_size=5, latent_channels=6, drift_magnitude=0.0018,
-                 momentum=0.85, device=None):
+                 momentum=0.85, nonlinearity_scale=0.6, edge_strength=0.3, device=None):
         """
         Args:
             kernel_size: Size of encoder/decoder spatial kernels.
             latent_channels: Width of the latent swirl field.
             drift_magnitude: Magnitude of kernel drift per heart tick.
             momentum: Momentum for drift direction updates.
+            nonlinearity_scale: Scale factor for final tanh (default: 0.6)
+            edge_strength: Strength of edge stream injection (default: 0.3)
             device: torch device.
         """
         self.kernel_size = kernel_size
         self.latent_channels = latent_channels
+        self.nonlinearity_scale = nonlinearity_scale
+        self.edge_strength = edge_strength
         super().__init__(padding=kernel_size // 2, drift_magnitude=drift_magnitude,
                          momentum=momentum, device=device)
 
@@ -94,7 +98,8 @@ class Cherubim(Soul):
 
         # Blend latent motion, edge spikes, and a slight spatial roll for motion
         rolled = torch.roll(latent, shifts=(1, -1), dims=(2, 3))
-        braided = latent + 0.65 * edge + 0.35 * rolled
+        roll_strength = 1.0 - self.edge_strength  # Complementary strength
+        braided = latent + self.edge_strength * edge + roll_strength * rolled
         braided = braided * (0.55 + 0.45 * gate)
 
         # Decode back to RGB
@@ -106,7 +111,23 @@ class Cherubim(Soul):
         result = (1 - residual_alpha) * img_on_device + residual_alpha * out
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
-        result = torch.tanh(result * 0.6)
+        result = torch.tanh(result * self.nonlinearity_scale)
         
         # Keep on device for efficiency
         return result
+    
+    def get_soul_sliders(self):
+        """Return Cherubim-specific sliders"""
+        return [
+            {
+                "label": "Nonlinearity",
+                "value_attr": "nonlinearity_scale",
+                "min_value": 0.1
+            },
+            {
+                "label": "Edge Strength",
+                "value_attr": "edge_strength",
+                "min_value": 0.1,
+                "max_value": 0.9
+            }
+        ]

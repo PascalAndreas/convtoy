@@ -19,7 +19,8 @@ class Imp(Soul):
     useful for faster processing or different visual effects.
     """
     
-    def __init__(self, kernel_size=7, drift_magnitude=0.002, momentum=0.9, device=None):
+    def __init__(self, kernel_size=7, drift_magnitude=0.002, momentum=0.9, 
+                 nonlinearity_scale=0.5, device=None):
         """
         Initialize single-layer convolution processor.
         
@@ -27,9 +28,11 @@ class Imp(Soul):
             kernel_size: Size of convolution kernel (default: 7)
             drift_magnitude: Magnitude of drift direction vector
             momentum: Momentum factor for drift direction updates (0-1)
+            nonlinearity_scale: Scale factor for final tanh (default: 0.5)
             device: PyTorch device (cuda or cpu)
         """
         self.kernel_size = kernel_size
+        self.nonlinearity_scale = nonlinearity_scale
         super().__init__(padding=kernel_size // 2, drift_magnitude=drift_magnitude,
                         momentum=momentum, device=device)
     
@@ -78,8 +81,18 @@ class Imp(Soul):
         # Normalize
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
-        result = torch.tanh(result * 0.5)
+        result = torch.tanh(result * self.nonlinearity_scale)
         
         # Keep on device for efficiency
         return result
+    
+    def get_soul_sliders(self):
+        """Return Imp-specific sliders"""
+        return [
+            {
+                "label": "Nonlinearity",
+                "value_attr": "nonlinearity_scale",
+                "min_value": 0.1
+            }
+        ]
 

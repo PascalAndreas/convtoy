@@ -91,8 +91,8 @@ class ConvolutionArt:
         self.buttons = self._create_buttons()
         self.sliders = self._create_sliders()
         
-        # Create reusable surface for efficient pixel updates (no scaling)
-        self.display_surface = pygame.Surface((self.img_width, self.img_height))
+        # Create reusable surface for efficient pixel updates (32-bit RGBA for full color)
+        self.display_surface = pygame.Surface((self.img_width, self.img_height), depth=32)
         
         # Performance tracking
         self.show_timing = False  # Toggle with 'T' key
@@ -292,7 +292,7 @@ class ConvolutionArt:
         self.img_height = new_height
         
         # Recreate display surface and perturbation mask
-        self.display_surface = pygame.Surface((self.img_width, self.img_height))
+        self.display_surface = pygame.Surface((self.img_width, self.img_height), depth=32)
         self.perturbation_mask = self._create_perturbation_mask()
     
     def toggle_fullscreen(self):

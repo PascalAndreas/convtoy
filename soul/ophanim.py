@@ -20,17 +20,21 @@ class Ophanim(Soul):
     """
 
     def __init__(self, kernel_size=5, dilations=(1, 2), drift_magnitude=0.0015,
-                 momentum=0.8, device=None):
+                 momentum=0.8, nonlinearity_scale=0.6, spiral_intensity=0.25, device=None):
         """
         Args:
             kernel_size: Base kernel size for the depthwise filters.
             dilations: Iterable of dilation factors for the depthwise stack.
             drift_magnitude: Magnitude of kernel drift per heart tick.
             momentum: Momentum for drift direction updates.
+            nonlinearity_scale: Scale factor for final tanh (default: 0.6)
+            spiral_intensity: Intensity of spiral phase field (default: 0.25)
             device: torch device.
         """
         self.kernel_size = kernel_size
         self.dilations = tuple(dilations)
+        self.nonlinearity_scale = nonlinearity_scale
+        self.spiral_intensity = spiral_intensity
         super().__init__(padding=kernel_size // 2, drift_magnitude=drift_magnitude,
                          momentum=momentum, device=device)
 
@@ -91,7 +95,7 @@ class Ophanim(Soul):
             if len(swirls) > 1:
                 phase = torch.atan2(swirls[-1], swirls[0] + 1e-6)
                 spiral = base * torch.cos(phase) + torch.sin(phase)
-                spiral = spiral + 0.25 * torch.sin(phase * 2)
+                spiral = spiral + self.spiral_intensity * torch.sin(phase * 2)
                 fused = base * 0.6 + torch.tanh(spiral) * 0.4
             else:
                 fused = base
@@ -108,7 +112,22 @@ class Ophanim(Soul):
         result = (1 - residual_alpha) * img_on_device + residual_alpha * fused
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
-        result = torch.tanh(result * 0.6)
+        result = torch.tanh(result * self.nonlinearity_scale)
         
         # Keep on device for efficiency
         return result
+    
+    def get_soul_sliders(self):
+        """Return Ophanim-specific sliders"""
+        return [
+            {
+                "label": "Nonlinearity",
+                "value_attr": "nonlinearity_scale",
+                "min_value": 0.1
+            },
+            {
+                "label": "Spiral Intensity",
+                "value_attr": "spiral_intensity",
+                "max_value": 0.5
+            }
+        ]
