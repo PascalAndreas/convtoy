@@ -20,7 +20,7 @@ class Seraphim(Soul):
     """
     
     def __init__(self, kernel_size=7, num_layers=5, drift_magnitude=0.002, 
-                 momentum=0.7, device=None):
+                 momentum=0.7, nonlinearity_scale=0.5, device=None):
         """
         Initialize multi-layer convolution processor.
         
@@ -29,10 +29,12 @@ class Seraphim(Soul):
             num_layers: Number of sequential convolution layers (default: 5)
             drift_magnitude: Magnitude of drift direction vector
             momentum: Momentum factor for drift direction updates (0-1)
+            nonlinearity_scale: Scale factor for final tanh (0-1, default: 0.5)
             device: PyTorch device (cuda or cpu)
         """
         self.num_layers = num_layers
         self.kernel_size = kernel_size
+        self.nonlinearity_scale = nonlinearity_scale
         super().__init__(padding=kernel_size // 2, drift_magnitude=drift_magnitude,
                         momentum=momentum, device=device)
     
@@ -89,7 +91,17 @@ class Seraphim(Soul):
         # This maintains contrast structure without brutal rescaling
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
-        result = torch.tanh(result * 0.5)  # Soft clamp
+        result = torch.tanh(result * self.nonlinearity_scale)  # Soft clamp
         
         return result
+    
+    def get_sliders(self):
+        """Return Seraphim-specific sliders"""
+        return [
+            {
+                "label": "Nonlinearity",
+                "value_attr": "nonlinearity_scale",
+                "min_value": 0.1
+            }
+        ]
 

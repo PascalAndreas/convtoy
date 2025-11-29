@@ -43,13 +43,12 @@ class ConvolutionArt:
                           hrv_amount=0.05, breathing_rate=0.25)
         
         # Drift scaling factor (multiplies ECG signal)
-        self.drift_scale = 0.0
-        self.max_drift_scale = 1.0
+        self.drift_scale = 0.8
         
-        # Image dimensions (double size, no scaling needed)
-        # 512 - 2*padding ensures power of 2 after circular padding
-        self.img_width = 512 - 2 * self.conv_processor.padding
-        self.img_height = 512 - 2 * self.conv_processor.padding
+        # Image dimensions (no scaling needed)
+        # Base size - 2*padding to account for circular padding during convolution
+        self.img_width = 1024 - 2 * self.conv_processor.padding
+        self.img_height = 1024 - 2 * self.conv_processor.padding
         
         # Calculate window size dynamically based on image size
         self.window_width = self.img_width + UI_PANEL_WIDTH + IMAGE_MARGIN * 3
@@ -64,18 +63,16 @@ class ConvolutionArt:
         # Fullscreen mode
         self.fullscreen = False
         self.original_size = (self.window_width, self.window_height)
-        self.fullscreen_img_size = None  # Will be set when entering fullscreen
+        self.original_img_size = (self.img_width, self.img_height)
         
         # Initialize random image
         self.image = self._random_image()
         
         # Image noise settings (continuous center + vignette perturbation)
         self.noise_amount = 0.0  # How much random noise to add to image each frame
-        self.max_noise = 0.2
         
         # Residual/blend parameter (prevents collapse)
-        self.residual_alpha = 0.2  # How much of new conv to blend in (0=no change, 1=full replacement)
-        self.max_residual = 1.0
+        self.residual_alpha = 0.8  # How much of new conv to blend in (0=no change, 1=full replacement)
         
         # Precompute center + vignette mask
         self._create_perturbation_mask()
@@ -85,12 +82,12 @@ class ConvolutionArt:
         self.mouse_press_start = 0
         self.mouse_pos = (0, 0)
         self.perturb_radius = 30
-        self.display_offset = (20, 20)  # Where image is drawn on screen
+        self.display_offset = (IMAGE_MARGIN, IMAGE_MARGIN)
         
         # UI elements
         self.font = pygame.font.Font(None, 24)
         self.buttons = self._create_buttons()
-        self.slider = self._create_slider()
+        self.sliders = self._create_sliders()
         
         # Create reusable surface for efficient pixel updates (no scaling)
         self.display_surface = pygame.Surface((self.img_width, self.img_height))
@@ -131,216 +128,180 @@ class ConvolutionArt:
     
     def _create_buttons(self):
         """Create UI buttons"""
+        button_configs = [
+            {"text": "Randomize Image (I)", "action": "randomize_image"},
+            {"text": "Randomize Kernels (K)", "action": "randomize_kernel"}
+        ]
+        
         button_width = 180
         button_height = 40
         spacing = 10
         start_x = self.window_width - button_width - 20
         start_y = 20
         
-        buttons = [
-            {
-                "rect": pygame.Rect(start_x, start_y, button_width, button_height),
-                "text": "Randomize Image (I)",
-                "action": "randomize_image",
+        buttons = []
+        for i, config in enumerate(button_configs):
+            buttons.append({
+                "rect": pygame.Rect(start_x, start_y + i * (button_height + spacing), 
+                                   button_width, button_height),
+                "text": config["text"],
+                "action": config["action"],
                 "hovered": False
-            },
-            {
-                "rect": pygame.Rect(start_x, start_y + (button_height + spacing), button_width, button_height),
-                "text": "Randomize Kernels (K)",
-                "action": "randomize_kernel",
-                "hovered": False
-            }
-        ]
+            })
         return buttons
     
-    def _create_slider(self):
-        """Create drift control sliders"""
+    def _create_sliders(self):
+        """Create control sliders dynamically"""
+        # Base slider definitions (main app sliders)
+        slider_configs = [
+            {"label": "Drift", "value_attr": "drift_scale", "target_obj": self},
+            {"label": "Perturbation", "value_attr": "noise_amount", "max_value": 0.2, "target_obj": self},
+            {"label": "Residual Mix", "value_attr": "residual_alpha", "target_obj": self}
+        ]
+        
+        # Add soul-specific sliders
+        for soul_slider in self.conv_processor.get_sliders():
+            slider_configs.append({**soul_slider, "target_obj": self.conv_processor})
+        
+        # Build slider objects with dynamic layout
         slider_width = 180
         slider_height = 20
         slider_x = self.window_width - slider_width - 20
         slider_y = 140
         spacing = 60
         
-        sliders = [
-            {
-                "rect": pygame.Rect(slider_x, slider_y, slider_width, slider_height),
-                "handle_x": slider_x + int(slider_width * (self.drift_scale / self.max_drift_scale)),
+        sliders = []
+        for i, config in enumerate(slider_configs):
+            target = config["target_obj"]
+            value = getattr(target, config["value_attr"])
+            
+            # Apply defaults: min=0.0, max=1.0
+            min_val = config.get("min_value", 0.0)
+            max_val = config.get("max_value", 1.0)
+            
+            # Calculate handle position based on value range
+            value_range = max_val - min_val
+            normalized_pos = (value - min_val) / value_range if value_range > 0 else 0
+            
+            sliders.append({
+                "rect": pygame.Rect(slider_x, slider_y + i * spacing, slider_width, slider_height),
+                "handle_x": slider_x + int(slider_width * normalized_pos),
                 "dragging": False,
-                "label": "Drift Scale (Heart)",
-                "value_attr": "drift_scale",
-                "max_attr": "max_drift_scale",
-                "target_obj": self
-            },
-            {
-                "rect": pygame.Rect(slider_x, slider_y + spacing, slider_width, slider_height),
-                "handle_x": slider_x + int(slider_width * (self.noise_amount / self.max_noise)),
-                "dragging": False,
-                "label": "Perturbation",
-                "value_attr": "noise_amount",
-                "max_attr": "max_noise",
-                "target_obj": self
-            },
-            {
-                "rect": pygame.Rect(slider_x, slider_y + spacing * 2, slider_width, slider_height),
-                "handle_x": slider_x + int(slider_width * (self.residual_alpha / self.max_residual)),
-                "dragging": False,
-                "label": "Residual Mix",
-                "value_attr": "residual_alpha",
-                "max_attr": "max_residual",
-                "target_obj": self
-            }
-        ]
+                "label": config["label"],
+                "value_attr": config["value_attr"],
+                "min_value": min_val,
+                "max_value": max_val,
+                "target_obj": target
+            })
         
         return sliders
     
     def apply_image_noise(self):
         """Add random noise with center + vignette pattern"""
-        if self.noise_amount > 0:
-            # Generate random noise for all channels
-            noise = torch.randn_like(self.image) * self.noise_amount
-            
-            # Apply mask to focus noise in center and edges
-            masked_noise = noise * self.perturbation_mask.unsqueeze(0)
-            
-            self.image = self.image + masked_noise
-            # Clamp to reasonable range
-            self.image = torch.clamp(self.image, -1, 1)
+        if self.noise_amount <= 0:
+            return
+        
+        # Generate and apply masked noise
+        noise = torch.randn_like(self.image) * self.noise_amount
+        masked_noise = noise * self.perturbation_mask.unsqueeze(0)
+        self.image = torch.clamp(self.image + masked_noise, -1, 1)
     
     def apply_mouse_perturbation(self):
         """Apply localized perturbation where mouse is pressed"""
         if not self.mouse_pressed:
             return
         
-        # Calculate how long mouse has been pressed (strength)
-        press_duration = pygame.time.get_ticks() - self.mouse_press_start
-        strength = min(press_duration / 1000.0, 5.0)  # Max 5 seconds for full strength
-        
-        # Convert mouse position to image coordinates
-        display_size = self.img_width  # Image is full size, no scaling
-        mouse_x, mouse_y = self.mouse_pos
-        
         # Check if mouse is over the image display area
-        img_rect = pygame.Rect(self.display_offset[0], self.display_offset[1], display_size, display_size)
+        mouse_x, mouse_y = self.mouse_pos
+        img_rect = pygame.Rect(self.display_offset[0], self.display_offset[1], 
+                               self.img_width, self.img_height)
         if not img_rect.collidepoint(mouse_x, mouse_y):
             return
         
         # Convert to image coordinates
-        rel_x = (mouse_x - self.display_offset[0]) / display_size
-        rel_y = (mouse_y - self.display_offset[1]) / display_size
+        img_x = int((mouse_x - self.display_offset[0]) / self.img_width * self.img_width)
+        img_y = int((mouse_y - self.display_offset[1]) / self.img_height * self.img_height)
         
-        img_x = int(rel_x * self.img_width)
-        img_y = int(rel_y * self.img_height)
+        # Calculate strength based on press duration
+        press_duration = pygame.time.get_ticks() - self.mouse_press_start
+        strength = min(press_duration / 1000.0, 5.0) * 0.05
         
-        # Create a localized perturbation with true zero outside radius
+        # Create coordinate grid
         y_coords, x_coords = torch.meshgrid(
             torch.arange(self.img_height, dtype=torch.float32),
             torch.arange(self.img_width, dtype=torch.float32),
             indexing='ij'
         )
         
-        # Calculate distance from click point (with wrapping for toroidal topology)
-        dx = torch.abs(x_coords - img_x)
-        dy = torch.abs(y_coords - img_y)
-        
-        # Account for wrapping
-        dx = torch.min(dx, self.img_width - dx)
-        dy = torch.min(dy, self.img_height - dy)
-        
+        # Calculate toroidal distance (wrapping at edges)
+        dx = torch.min(torch.abs(x_coords - img_x), self.img_width - torch.abs(x_coords - img_x))
+        dy = torch.min(torch.abs(y_coords - img_y), self.img_height - torch.abs(y_coords - img_y))
         dist = torch.sqrt(dx**2 + dy**2)
         
-        # Create Gaussian falloff with hard cutoff at 2*radius
-        mask = torch.exp(-(dist**2) / (2 * (self.perturb_radius**2)))
+        # Create localized Gaussian mask
+        mask = torch.exp(-(dist**2) / (2 * self.perturb_radius**2))
         mask = torch.where(dist <= self.perturb_radius * 2, mask, torch.zeros_like(mask))
         
-        # Only generate noise where mask is non-zero (more efficient and truly localized)
-        noise = torch.randn(3, self.img_height, self.img_width) * strength * 0.05
-        perturbation = noise * mask.unsqueeze(0)
-        
-        self.image = self.image + perturbation
+        # Apply perturbation
+        noise = torch.randn(3, self.img_height, self.img_width) * strength
+        self.image = self.image + noise * mask.unsqueeze(0)
     
     def image_to_surface(self, img_tensor):
-        """Convert torch tensor to pygame surface using efficient blit_array"""
-        # Min-max normalization ONLY for display (not part of dynamics)
-        img_display = (img_tensor - img_tensor.min()) / (img_tensor.max() - img_tensor.min() + 1e-6)
+        """Convert torch tensor to pygame surface"""
+        # Min-max normalization for display only
+        img_min, img_max = img_tensor.min(), img_tensor.max()
+        img_display = (img_tensor - img_min) / (img_max - img_min + 1e-6)
         
-        # Clamp and convert to [0, 255]
-        img_display = torch.clamp(img_display, 0, 1)
+        # Convert to uint8 and blit
         img_np = (img_display.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-        
-        # Blit array directly to surface (swapaxes for pygame's x,y convention)
         pygame.surfarray.blit_array(self.display_surface, img_np.swapaxes(0, 1))
         
         return self.display_surface
+    
+    def _resize_image(self, new_width, new_height):
+        """Helper to resize image and recreate surfaces"""
+        # Resize image using bilinear interpolation
+        resized = F.interpolate(self.image.unsqueeze(0), 
+                               size=(new_height, new_width), 
+                               mode='bilinear', align_corners=False)
+        self.image = resized.squeeze(0)
+        
+        # Update dimensions
+        self.img_width = new_width
+        self.img_height = new_height
+        
+        # Recreate display surface and perturbation mask
+        self.display_surface = pygame.Surface((self.img_width, self.img_height))
+        self._create_perturbation_mask()
     
     def toggle_fullscreen(self):
         """Toggle between windowed and fullscreen mode"""
         self.fullscreen = not self.fullscreen
         
         if self.fullscreen:
-            # Get screen resolution
+            # Get screen resolution and set fullscreen
             info = pygame.display.Info()
-            screen_width = info.current_w
-            screen_height = info.current_h
+            self.screen = pygame.display.set_mode((info.current_w, info.current_h), pygame.FULLSCREEN)
             
-            # Set fullscreen
-            self.screen = pygame.display.set_mode((screen_width, screen_height), pygame.FULLSCREEN)
-            
-            # Resize image to match screen resolution
-            # Preserve aspect ratio by using smaller dimension
-            target_size = min(screen_width, screen_height)
-            self.fullscreen_img_size = target_size - 2 * self.conv_processor.padding
-            
-            # Save old image, create new size, scale up the image state
-            old_image = self.image
-            old_width, old_height = self.img_width, self.img_height
-            
-            # Update dimensions
-            self.img_width = self.fullscreen_img_size
-            self.img_height = self.fullscreen_img_size
-            
-            # Resize image using interpolation
-            old_image_batch = old_image.unsqueeze(0)
-            resized = F.interpolate(old_image_batch, size=(self.img_height, self.img_width), 
-                                   mode='bilinear', align_corners=False)
-            self.image = resized.squeeze(0)
-            
-            # Recreate display surface
-            self.display_surface = pygame.Surface((self.img_width, self.img_height))
-            
-            # Recreate perturbation mask for new size
-            self._create_perturbation_mask()
-            
+            # Calculate fullscreen image size (preserve aspect ratio)
+            target_size = min(info.current_w, info.current_h) - 2 * self.conv_processor.padding
+            self._resize_image(target_size, target_size)
         else:
             # Return to windowed mode
             self.screen = pygame.display.set_mode(self.original_size)
-            
-            # Save fullscreen image, restore original size
-            old_image = self.image
-            
-            # Restore original dimensions
-            self.img_width = 512 - 2 * self.conv_processor.padding
-            self.img_height = 512 - 2 * self.conv_processor.padding
-            
-            # Resize image back down
-            old_image_batch = old_image.unsqueeze(0)
-            resized = F.interpolate(old_image_batch, size=(self.img_height, self.img_width), 
-                                   mode='bilinear', align_corners=False)
-            self.image = resized.squeeze(0)
-            
-            # Recreate display surface
-            self.display_surface = pygame.Surface((self.img_width, self.img_height))
-            
-            # Recreate perturbation mask for new size
-            self._create_perturbation_mask()
+            self._resize_image(self.original_img_size[0], self.original_img_size[1])
     
     def handle_button_click(self, pos):
         """Handle button clicks"""
         for button in self.buttons:
             if button["rect"].collidepoint(pos):
-                if button["action"] == "randomize_image":
+                action = button["action"]
+                if action == "randomize_image":
                     self.image = self._random_image()
-                elif button["action"] == "randomize_kernel":
+                elif action == "randomize_kernel":
                     self.conv_processor.randomize_kernels()
+                return True
+        return False
     
     def handle_slider_drag(self, pos, slider):
         """Handle slider dragging"""
@@ -348,11 +309,24 @@ class ConvolutionArt:
             # Update handle position
             slider["handle_x"] = max(slider["rect"].left, 
                                     min(pos[0], slider["rect"].right))
-            # Update value
+            # Update value with min/max range
             slider_pos = (slider["handle_x"] - slider["rect"].left) / slider["rect"].width
-            target_obj = slider["target_obj"]
-            setattr(target_obj, slider["value_attr"].split('.')[-1], 
-                   slider_pos * getattr(target_obj, slider["max_attr"].split('.')[-1]))
+            min_val = slider["min_value"]
+            max_val = slider["max_value"]
+            value = min_val + slider_pos * (max_val - min_val)
+            setattr(slider["target_obj"], slider["value_attr"], value)
+    
+    def draw_fps(self):
+        """Draw FPS counter in top-left corner"""
+        fps = self.clock.get_fps()
+        fps_text = f"FPS: {fps:.1f}"
+        fps_surf = self.font.render(fps_text, True, TEXT_COLOR)
+        # Add semi-transparent background for readability
+        fps_bg = pygame.Surface((fps_surf.get_width() + 10, fps_surf.get_height() + 6))
+        fps_bg.set_alpha(180)
+        fps_bg.fill(BLACK)
+        self.screen.blit(fps_bg, (5, 5))
+        self.screen.blit(fps_surf, (10, 8))
     
     def draw_ui(self):
         """Draw UI elements"""
@@ -368,7 +342,7 @@ class ConvolutionArt:
             self.screen.blit(text_surf, text_rect)
         
         # Draw sliders
-        for slider in self.slider:
+        for slider in self.sliders:
             # Label
             label_surf = self.font.render(slider["label"], True, TEXT_COLOR)
             self.screen.blit(label_surf, (slider["rect"].x, slider["rect"].y - 25))
@@ -384,8 +358,7 @@ class ConvolutionArt:
                              handle_radius)
             
             # Value display
-            target_obj = slider["target_obj"]
-            value = getattr(target_obj, slider["value_attr"].split('.')[-1])
+            value = getattr(slider["target_obj"], slider["value_attr"])
             value_text = f"{value:.4f}"
             value_surf = self.font.render(value_text, True, TEXT_COLOR)
             self.screen.blit(value_surf, (slider["rect"].x, slider["rect"].y + 25))
@@ -428,9 +401,9 @@ class ConvolutionArt:
                 
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:  # Left click
-                        # Check sliders
+                        # Check sliders first
                         slider_clicked = False
-                        for slider in self.slider:
+                        for slider in self.sliders:
                             if slider["rect"].collidepoint(event.pos):
                                 slider["dragging"] = True
                                 self.handle_slider_drag(event.pos, slider)
@@ -438,23 +411,15 @@ class ConvolutionArt:
                                 break
                         
                         # Check buttons if no slider was clicked
-                        if not slider_clicked:
-                            button_clicked = False
-                            for button in self.buttons:
-                                if button["rect"].collidepoint(event.pos):
-                                    self.handle_button_click(event.pos)
-                                    button_clicked = True
-                                    break
-                            
-                            # If neither slider nor button clicked, start mouse perturbation
-                            if not button_clicked:
-                                self.mouse_pressed = True
-                                self.mouse_press_start = pygame.time.get_ticks()
-                                self.mouse_pos = event.pos
+                        if not slider_clicked and not self.handle_button_click(event.pos):
+                            # Start mouse perturbation
+                            self.mouse_pressed = True
+                            self.mouse_press_start = pygame.time.get_ticks()
+                            self.mouse_pos = event.pos
                 
                 elif event.type == pygame.MOUSEBUTTONUP:
                     if event.button == 1:
-                        for slider in self.slider:
+                        for slider in self.sliders:
                             slider["dragging"] = False
                         self.mouse_pressed = False
                 
@@ -464,7 +429,7 @@ class ConvolutionArt:
                         button["hovered"] = button["rect"].collidepoint(event.pos)
                     
                     # Handle slider dragging
-                    for slider in self.slider:
+                    for slider in self.sliders:
                         if slider["dragging"]:
                             self.handle_slider_drag(event.pos, slider)
                     
@@ -472,15 +437,18 @@ class ConvolutionArt:
                     if self.mouse_pressed:
                         self.mouse_pos = event.pos
             
-            # Get heart signal and apply kernel drift
+            # Get heart signal and pump (impulsive heartbeat signal)
             heart_signal = self.heart.beat()
+            pump_signal = self.heart.get_pump_signal()
             
             # Change drift direction (random walk on sphere with momentum)
-            # Use a constant change amount for smooth evolution
-            self.conv_processor.change_drift(change_amount=0.01)
+            # Use pump signal for more impulsive, visceral heartbeat feeling
+            self.conv_processor.change_drift(0.02 * pump_signal)
             
-            # Apply drift using heart signal
-            self.conv_processor.apply_drift(heart_signal * self.drift_scale)
+            # Apply drift using heart signal modulated by pump
+            # This creates a strong "thump" during each heartbeat
+            drift_signal = heart_signal * (1.0 + 3.0 * pump_signal)
+            self.conv_processor.apply_drift(drift_signal * self.drift_scale)
             
             # Apply image noise
             self.apply_image_noise()
@@ -493,24 +461,21 @@ class ConvolutionArt:
             
             # Render
             self.screen.fill(BLACK)
-            
-            # Draw image
             surface = self.image_to_surface(self.image)
             
+            # Calculate display position and draw appropriate UI
             if self.fullscreen:
-                # Center image in fullscreen
-                screen_width = self.screen.get_width()
-                screen_height = self.screen.get_height()
-                x = (screen_width - self.img_width) // 2
-                y = (screen_height - self.img_height) // 2
-                self.screen.blit(surface, (x, y))
+                screen_w, screen_h = self.screen.get_size()
+                x = (screen_w - self.img_width) // 2
+                y = (screen_h - self.img_height) // 2
+                self.display_offset = (x, y)
             else:
-                # Normal windowed mode
-                self.screen.blit(surface, (20, 20))
-                # Draw UI only in windowed mode
-                self.draw_ui()
+                self.display_offset = (IMAGE_MARGIN, IMAGE_MARGIN)
+                self.draw_ui()  # Draw full UI only in windowed mode
             
-            # Update display
+            self.screen.blit(surface, self.display_offset)
+            self.draw_fps()  # Always draw FPS counter
+            
             pygame.display.flip()
             self.clock.tick(FPS)
         

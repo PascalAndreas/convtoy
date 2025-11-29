@@ -290,4 +290,25 @@ class Heart:
             breaths_per_minute: Breaths per minute (typical: 12-20)
         """
         self.breathing_rate = breaths_per_minute / 60.0  # Convert to breaths per second
+    
+    def get_pump_signal(self, width=0.08):
+        """
+        Get an impulsive "pump" signal that spikes during R wave.
+        
+        This provides a short, intense burst during each heartbeat that makes
+        the heart's rhythm much more viscerally apparent in visuals.
+        
+        Args:
+            width: Width of the pump impulse as fraction of beat cycle (default: 0.08)
+            
+        Returns:
+            Pump signal value (0 to 1, spikes near R wave)
+        """
+        phase = self.get_phase()
+        r_center = self.wave_params['r_center']
+        
+        # Create narrow Gaussian pulse around R wave
+        pump = np.exp(-((phase - r_center) ** 2) / (2 * (width ** 2)))
+        
+        return pump * self.current_amplitude
 

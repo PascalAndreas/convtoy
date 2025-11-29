@@ -18,7 +18,7 @@ class Soul(ABC):
     kernel initialization, drift behavior, and layer composition.
     """
     
-    def __init__(self, padding=3, drift_magnitude=0.002, momentum=0.9, device=None):
+    def __init__(self, padding=3, drift_magnitude=0.02, momentum=0.7, device=None):
         """
         Initialize the convolution processor.
         
@@ -36,12 +36,20 @@ class Soul(ABC):
         # Initialize kernels
         self.kernels = self._initialize_kernels()
         
+        # Ensure kernels are zero-mean
+        self.kernels = [self._enforce_zero_mean(k) for k in self.kernels]
+        
+        # Store initial kernel scales (RMS = root mean square) to maintain energy
+        # For zero-mean signals, RMS is the natural measure of energy
+        self.kernel_scales = [torch.sqrt(torch.mean(k ** 2)).item() for k in self.kernels]
+        
         # Initialize drift directions (one per kernel, on unit sphere)
         self.drift_directions = []
         self.drift_velocities = []  # For momentum
         for kernel in self.kernels:
             # Initialize random direction on unit sphere
             direction = torch.randn_like(kernel)
+            direction = self._enforce_zero_mean(direction)  # Ensure zero-mean
             direction = direction / (direction.norm() + 1e-8)
             self.drift_directions.append(direction)
             
@@ -73,15 +81,47 @@ class Soul(ABC):
         """
         pass
     
+    def get_sliders(self):
+        """
+        Return soul-specific slider definitions.
+        
+        Returns:
+            List of slider config dicts with keys:
+                - label: Display name (required)
+                - value_attr: Attribute name on soul object (required)
+                - min_value: Minimum value (optional, default: 0.0)
+                - max_value: Maximum value (optional, default: 1.0)
+        """
+        return []
+    
+    def _enforce_zero_mean(self, kernel):
+        """
+        Enforce zero-mean constraint on a kernel.
+        
+        Args:
+            kernel: Kernel tensor to make zero-mean
+            
+        Returns:
+            Zero-mean kernel tensor
+        """
+        return kernel - kernel.mean()
+    
     def randomize_kernels(self):
         """Randomize all kernels and reset drift directions."""
         self.kernels = self._initialize_kernels()
+        
+        # Ensure kernels are zero-mean
+        self.kernels = [self._enforce_zero_mean(k) for k in self.kernels]
+        
+        # Reset kernel scales (RMS for zero-mean signals)
+        self.kernel_scales = [torch.sqrt(torch.mean(k ** 2)).item() for k in self.kernels]
         
         # Reset drift directions and velocities
         self.drift_directions = []
         self.drift_velocities = []
         for kernel in self.kernels:
             direction = torch.randn_like(kernel)
+            direction = self._enforce_zero_mean(direction)  # Ensure zero-mean
             direction = direction / (direction.norm() + 1e-8)
             self.drift_directions.append(direction)
             
@@ -111,6 +151,9 @@ class Soul(ABC):
                 # Update direction with velocity
                 new_direction = self.drift_directions[i] + self.drift_velocities[i]
                 
+                # Ensure zero-mean before projecting to unit sphere
+                new_direction = self._enforce_zero_mean(new_direction)
+                
                 # Project back onto unit sphere
                 new_direction = new_direction / (new_direction.norm() + 1e-8)
                 
@@ -120,17 +163,31 @@ class Soul(ABC):
         """
         Apply drift to kernels using the heart signal and current drift directions.
         
-        The drift is applied in the direction of the current drift direction vector,
-        scaled by the drift magnitude and the heart signal.
+        From first principles:
+        - Drift must preserve zero-mean (done by having zero-mean drift directions)
+        - Kernel energy must stay bounded to prevent explosion or collapse
+        - But we want soft constraints that allow organic evolution
         
         Args:
             heart_signal: Signal value from the heart (typically from ECG)
         """
         if abs(heart_signal) > 1e-8:
             for i in range(len(self.kernels)):
-                # Apply drift in the current direction
+                # Apply drift in the current direction (zero-mean by construction)
                 drift = self.drift_directions[i] * self.drift_magnitude * heart_signal
                 self.kernels[i] = self.kernels[i] + drift
                 
-                # Re-normalize to prevent explosion
-                self.kernels[i] = self.kernels[i] / (self.kernels[i].abs().sum() + 1e-6)
+                # Maintain energy: use RMS (root mean square) for zero-mean signals
+                # RMS is more principled than std for maintaining signal energy
+                current_rms = torch.sqrt(torch.mean(self.kernels[i] ** 2))
+                target_rms = self.kernel_scales[i]
+                
+                if current_rms > 1e-8:
+                    # Soft pull toward target RMS with exponential averaging
+                    # This allows drift while preventing unbounded growth/decay
+                    scale_factor = torch.lerp(
+                        torch.tensor(1.0),
+                        torch.tensor(target_rms / current_rms),
+                        0.1  # 10% correction toward target per drift
+                    )
+                    self.kernels[i] = self.kernels[i] * scale_factor
