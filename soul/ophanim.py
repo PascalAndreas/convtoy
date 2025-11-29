@@ -20,7 +20,9 @@ class Ophanim(Soul):
     """
 
     def __init__(self, kernel_size=5, dilations=(1, 2), drift_magnitude=0.0015,
-                 momentum=0.8, nonlinearity_scale=0.6, spiral_intensity=0.25, device=None):
+                 momentum=0.8, nonlinearity_scale=0.6, spiral_intensity=0.25,
+                 magnitude_influence=0.5, spiral_blend=0.4, phase_offset=0.0,
+                 num_harmonics=2, harmonic_falloff=1.5, phase_momentum=0.3, device=None):
         """
         Args:
             kernel_size: Base kernel size for the depthwise filters.
@@ -29,12 +31,25 @@ class Ophanim(Soul):
             momentum: Momentum for drift direction updates.
             nonlinearity_scale: Scale factor for final tanh (default: 0.6)
             spiral_intensity: Intensity of spiral phase field (default: 0.25)
+            magnitude_influence: How much magnitude modulates spiral (default: 0.5)
+            spiral_blend: Blend ratio between base and spiral (default: 0.4)
+            phase_offset: Phase rotation offset in radians (default: 0.0)
+            num_harmonics: Number of harmonic frequencies to add (default: 2)
+            harmonic_falloff: Exponential falloff for harmonics (default: 1.5)
+            phase_momentum: Temporal momentum for phase evolution (default: 0.3)
             device: torch device.
         """
         self.kernel_size = kernel_size
         self.dilations = tuple(dilations)
         self.nonlinearity_scale = nonlinearity_scale
         self.spiral_intensity = spiral_intensity
+        self.magnitude_influence = magnitude_influence
+        self.spiral_blend = spiral_blend
+        self.phase_offset = phase_offset
+        self.num_harmonics = num_harmonics
+        self.harmonic_falloff = harmonic_falloff
+        self.phase_momentum = phase_momentum
+        self.prev_phase = None  # For temporal coherence
         super().__init__(padding=kernel_size // 2, drift_magnitude=drift_magnitude,
                          momentum=momentum, device=device)
 
@@ -93,10 +108,33 @@ class Ophanim(Soul):
         else:
             base = torch.tanh(swirls[0])
             if len(swirls) > 1:
-                phase = torch.atan2(swirls[-1], swirls[0] + 1e-6)
-                spiral = base * torch.cos(phase) + torch.sin(phase)
-                spiral = spiral + self.spiral_intensity * torch.sin(phase * 2)
-                fused = base * 0.6 + torch.tanh(spiral) * 0.4
+                # Compute magnitude and phase from complex representation
+                magnitude = torch.sqrt(swirls[0]**2 + swirls[-1]**2 + 1e-6)
+                phase = torch.atan2(swirls[-1], swirls[0] + 1e-6) + self.phase_offset
+                
+                # Apply temporal momentum for smoother rotation
+                if self.prev_phase is not None:
+                    prev_phase_device = self.prev_phase.to(self.device)
+                    # Handle phase wraparound (-π to π)
+                    phase_diff = phase - prev_phase_device
+                    phase_diff = torch.atan2(torch.sin(phase_diff), torch.cos(phase_diff))
+                    phase = phase + self.phase_momentum * phase_diff
+                self.prev_phase = phase.detach().cpu()
+                
+                # Normalize magnitude for modulation
+                mag_norm = magnitude / (magnitude.mean(dim=(1, 2, 3), keepdim=True) + 1e-6)
+                mag_modulation = 1.0 + self.magnitude_influence * (mag_norm - 1.0)
+                
+                # Create spiral with magnitude modulation
+                spiral = mag_modulation * (base * torch.cos(phase) + torch.sin(phase))
+                
+                # Add harmonic series for richer patterns
+                for n in range(1, int(self.num_harmonics) + 1):
+                    weight = self.spiral_intensity / (n ** self.harmonic_falloff)
+                    spiral = spiral + weight * torch.sin(phase * (n + 1))
+                
+                # Configurable blend between base and spiral
+                fused = (1 - self.spiral_blend) * base + self.spiral_blend * torch.tanh(spiral)
             else:
                 fused = base
 
@@ -123,11 +161,49 @@ class Ophanim(Soul):
             {
                 "label": "Nonlinearity",
                 "value_attr": "nonlinearity_scale",
-                "min_value": 0.1
+                "min_value": 0.1,
+                "max_value": 1.0
             },
             {
                 "label": "Spiral Intensity",
                 "value_attr": "spiral_intensity",
+                "min_value": 0.0,
                 "max_value": 0.5
+            },
+            {
+                "label": "Magnitude Influence",
+                "value_attr": "magnitude_influence",
+                "min_value": 0.0,
+                "max_value": 1.0
+            },
+            {
+                "label": "Spiral Blend",
+                "value_attr": "spiral_blend",
+                "min_value": 0.0,
+                "max_value": 1.0
+            },
+            {
+                "label": "Phase Offset",
+                "value_attr": "phase_offset",
+                "min_value": -3.14159,
+                "max_value": 3.14159
+            },
+            {
+                "label": "Harmonics",
+                "value_attr": "num_harmonics",
+                "min_value": 1,
+                "max_value": 5
+            },
+            {
+                "label": "Harmonic Falloff",
+                "value_attr": "harmonic_falloff",
+                "min_value": 1.0,
+                "max_value": 3.0
+            },
+            {
+                "label": "Phase Momentum",
+                "value_attr": "phase_momentum",
+                "min_value": 0.0,
+                "max_value": 0.8
             }
         ]

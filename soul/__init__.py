@@ -10,5 +10,9 @@ from .seraphim import Seraphim
 from .imp import Imp
 from .ophanim import Ophanim
 from .cherubim import Cherubim
+from .nephilim import Nephilim
+from .thrones import Thrones
+from .dominions import Dominions
+from .powers import Powers
 
-__all__ = ['Soul', 'Seraphim', 'Imp', 'Ophanim', 'Cherubim']
+__all__ = ['Soul', 'Seraphim', 'Imp', 'Ophanim', 'Cherubim', 'Nephilim', 'Thrones', 'Dominions', 'Powers']
