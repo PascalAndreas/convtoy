@@ -171,7 +171,7 @@ class Abaddon(Soul):
         result = (1 - residual_alpha) * img_on_device + residual_alpha * out
         result = result - result.mean(dim=(1, 2), keepdim=True)
         result = result / (result.std(dim=(1, 2), keepdim=True) + 1e-6)
-        result = torch.tanh(result * self.nonlinearity_scale)
+        result = torch.sigmoid(result * self.nonlinearity_scale)
 
         return result
 
