@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 import sys
 import time
+import os
+from datetime import datetime
 from collections import deque
 from soul import Seraphim, Imp
 from heart import Heart
@@ -103,6 +105,13 @@ class ConvolutionArt:
             'render': deque(maxlen=60),
             'total': deque(maxlen=60)
         }
+        
+        # Playback control
+        self.paused = False
+        
+        # Screenshot directory
+        self.screenshot_dir = "screenshots"
+        os.makedirs(self.screenshot_dir, exist_ok=True)
         
     def _random_image(self):
         """Generate a random RGB image on device"""
@@ -337,10 +346,22 @@ class ConvolutionArt:
             value = min_val + slider_pos * (max_val - min_val)
             setattr(slider["target_obj"], slider["value_attr"], value)
     
+    def take_screenshot(self):
+        """Save current image as PNG with timestamp"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Remove last 3 digits of microseconds
+        filename = f"screenshot_{timestamp}.png"
+        filepath = os.path.join(self.screenshot_dir, filename)
+        
+        # Save the current display surface
+        pygame.image.save(self.display_surface, filepath)
+        print(f"Screenshot saved: {filepath}")
+    
     def draw_fps(self):
         """Draw FPS counter in top-left corner"""
         fps = self.clock.get_fps()
         fps_text = f"FPS: {fps:.1f}"
+        if self.paused:
+            fps_text += " [PAUSED]"
         fps_surf = self.font.render(fps_text, True, TEXT_COLOR)
         # Add semi-transparent background for readability
         fps_bg = pygame.Surface((fps_surf.get_width() + 10, fps_surf.get_height() + 6))
@@ -430,6 +451,8 @@ class ConvolutionArt:
             "K - Randomize Kernels",
             "F - Fullscreen",
             "T - Toggle Timing",
+            "SPACE - Pause/Play",
+            "S - Screenshot",
             "",
             "Click & Hold:",
             "Perturb Image",
@@ -462,6 +485,12 @@ class ConvolutionArt:
                     elif event.key == pygame.K_t:
                         # Toggle timing display
                         self.show_timing = not self.show_timing
+                    elif event.key == pygame.K_SPACE:
+                        # Toggle pause
+                        self.paused = not self.paused
+                    elif event.key == pygame.K_s:
+                        # Take screenshot
+                        self.take_screenshot()
                 
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:  # Left click
@@ -503,35 +532,37 @@ class ConvolutionArt:
             
             frame_start = time.perf_counter()
             
-            # Get heart signal and pump (impulsive heartbeat signal)
-            heart_signal = self.heart.beat()
-            pump_signal = self.heart.get_pump_signal()
-            
-            # Drift and noise application
-            t0 = time.perf_counter()
-            # Change drift direction (random walk on sphere with momentum)
-            # Use pump signal for more impulsive, visceral heartbeat feeling
-            self.conv_processor.change_drift(0.02 * pump_signal)
-            
-            # Apply drift using heart signal modulated by pump
-            # This creates a strong "thump" during each heartbeat
-            drift_signal = heart_signal * (1.0 + 3.0 * pump_signal)
-            self.conv_processor.apply_drift(drift_signal * self.drift_scale)
-            t1 = time.perf_counter()
-            self.timing_history['drift'].append(t1 - t0)
-            
-            # Apply image noise and mouse perturbation
-            t0 = time.perf_counter()
-            self.apply_image_noise()
-            self.apply_mouse_perturbation()
-            t1 = time.perf_counter()
-            self.timing_history['noise'].append(t1 - t0)
-            
-            # Apply convolution
-            t0 = time.perf_counter()
-            self.image = self.conv_processor.apply(self.image, self.residual_alpha)
-            t1 = time.perf_counter()
-            self.timing_history['conv'].append(t1 - t0)
+            # Only process when not paused
+            if not self.paused:
+                # Get heart signal and pump (impulsive heartbeat signal)
+                heart_signal = self.heart.beat()
+                pump_signal = self.heart.get_pump_signal()
+                
+                # Drift and noise application
+                t0 = time.perf_counter()
+                # Change drift direction (random walk on sphere with momentum)
+                # Use pump signal for more impulsive, visceral heartbeat feeling
+                self.conv_processor.change_drift(0.02 * pump_signal)
+                
+                # Apply drift using heart signal modulated by pump
+                # This creates a strong "thump" during each heartbeat
+                drift_signal = heart_signal * (1.0 + 3.0 * pump_signal)
+                self.conv_processor.apply_drift(drift_signal * self.drift_scale)
+                t1 = time.perf_counter()
+                self.timing_history['drift'].append(t1 - t0)
+                
+                # Apply image noise and mouse perturbation
+                t0 = time.perf_counter()
+                self.apply_image_noise()
+                self.apply_mouse_perturbation()
+                t1 = time.perf_counter()
+                self.timing_history['noise'].append(t1 - t0)
+                
+                # Apply convolution
+                t0 = time.perf_counter()
+                self.image = self.conv_processor.apply(self.image, self.residual_alpha)
+                t1 = time.perf_counter()
+                self.timing_history['conv'].append(t1 - t0)
             
             # Render
             t0 = time.perf_counter()
